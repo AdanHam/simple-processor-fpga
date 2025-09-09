@@ -1,12 +1,12 @@
 module porc (
     input wire Resetn,
-    input wire Clock,     // datapath/control clock
-    input wire MClock,    // memory clock
+    input wire Clock,
+    input wire MClock,
     input wire Run,
-    output reg Done,
-    output [8:0] BusWires,
+    output wire Done,
+    output wire [8:0] BusWires,
 
-    // New debug outputs
+    // Debug outputs
     output wire [8:0] R0_out,
     output wire [8:0] R1_out,
     output wire [8:0] RA_out,
@@ -15,146 +15,108 @@ module porc (
     output wire [1:0] Tstep_state
 );
 
-    // Internal declarations
-    reg [7:0] Rin, ROmux;
-    reg GOmux, DOmux;
-    reg Ain, Gin, IRin;
-    reg sub, shift;
-    reg [1:0] Tstep_Q, Tstep_D;
-    wire [8:0] IR, RA, RG, ALU;
-    wire [8:0] R0, R1, R2, R3, R4, R5, R6, R7;
-    wire [2:0] I = IR[8:6];
-    wire [7:0] Xreg, Yreg;
+    reg [1:0] Tstep_Q;
+    reg DoneReg;
+    assign Done = DoneReg;
+    assign Tstep_state = Tstep_Q;
 
-    // Instruction memory
-    reg [19:0] addr_reg;
-    wire [19:0] addr = addr_reg;
-    reg [8:0] rom_data;
-    wire [8:0] DIN = rom_data;
-    reg advance_addr;
-    reg [8:0] memory [0:31];
+    // Instruction ROM
+    reg [4:0] addr;
+    wire [8:0] rom_data;
+    my_mem rom (.address(addr), .clock(MClock), .q(rom_data));
 
-    initial begin
-        memory[0] = 9'b001000000; // mvi R0
-        memory[1] = 9'b000000101; // #5
-        memory[2] = 9'b000001000; // mv R1, R0
-        memory[3] = 9'b010000001; // add R0, R1
-        memory[4] = 9'b011000000; // sub R0, R0
-        for (int i = 5; i < 32; i++) memory[i] = 9'b000000000;
-    end
+    // IR register
+    wire IRin = (Tstep_Q == 2'b00);
+    wire [8:0] IR;
+    regn #(9) ir_reg (.R(BusWires), .Rin(IRin), .Clock(Clock), .Resetn(Resetn), .Q(IR));
 
-    always @(posedge MClock)
-        rom_data <= memory[addr[4:0]];
+    wire [2:0] opcode = IR[8:6];
+    wire [2:0] dst = IR[5:3];
+    wire [2:0] src = IR[2:0];
 
-    always @(posedge MClock or negedge Resetn)
-        if (!Resetn) addr_reg <= 0;
-        else if (advance_addr) addr_reg <= addr_reg + 1;
+    // Decoder signals
+    wire [7:0] Rin, Rout;
+    dec3to8 dec_rin (.W(dst), .En(Tstep_Q == 2'b11), .Y(Rin));
+    dec3to8 dec_rout (.W(src), .En(1'b1), .Y(Rout));
 
-    // FSM timing logic
-    parameter T0 = 2'b00, T1 = 2'b01, T2 = 2'b10, T3 = 2'b11;
-    parameter MV = 3'b000, MVI = 3'b001, ADD = 3'b010, SUB = 3'b011, SPECIALM = 3'b101;
+    // Registers R0-R7
+    wire [8:0] R[7:0];
+    genvar i;
+    generate
+        for (i = 0; i < 8; i = i + 1) begin : reg_block
+            regn #(9) reg_i (.R(BusWires), .Rin(Rin[i]), .Clock(Clock), .Resetn(Resetn), .Q(R[i]));
+        end
+    endgenerate
 
-    dec3to8 decX(IR[5:3], 1'b1, Xreg);
-    dec3to8 decY(IR[2:0], 1'b1, Yreg);
+    // A register
+    wire [8:0] A;
+    wire Ain = (Tstep_Q == 2'b01 && opcode >= 3'b010);
+    regn #(9) A_reg (.R(BusWires), .Rin(Ain), .Clock(Clock), .Resetn(Resetn), .Q(A));
 
-    always @(Tstep_Q or I or Run) begin
-        case (Tstep_Q)
-            T0: Tstep_D <= Run ? T1 : T0;
-            T1: Tstep_D <= (I == MV || I == MVI) ? T0 : ((~Run) ? T2 : T1);
-            T2: Tstep_D <= ~Run ? T3 : T2;
-            T3: Tstep_D <= ~Run ? T0 : T3;
-            default: Tstep_D <= T0;
-        endcase
-    end
+    // G register and ALU
+    wire [8:0] G;
+    wire [8:0] alu_result;
+    wire sub = (opcode == 3'b011);
+    wire shift = (opcode == 3'b100);
+    regn #(9) G_reg (.R(alu_result), .Rin(Tstep_Q == 2'b10), .Clock(Clock), .Resetn(Resetn), .Q(G));
+    addsub alu (.sub(sub), .shift(shift), .Bus(BusWires), .A(A), .result(alu_result));
 
-    always @(Tstep_Q or I or Xreg or Yreg) begin    
-        case (Tstep_Q)
-            T0: begin
-                Done <= 0; IRin <= 1; Rin <= 0;
-                Ain <= 0; Gin <= 0; ROmux <= 0;
-                GOmux <= 0; DOmux <= 1; advance_addr <= 0;
-            end
-            T1: begin
-                IRin <= 0;
-                case (I)
-                    MV: begin
-                        Rin <= Xreg; Ain <= 0; Done <= 1;
-                        ROmux <= Yreg; GOmux <= 0; DOmux <= 0; Gin <= 0;
-                        advance_addr <= 1;
-                    end
-                    MVI: begin
-                        Rin <= Xreg; Ain <= 0; Done <= 1;
-                        ROmux <= 0; GOmux <= 0; DOmux <= 1; Gin <= 0;
-                        advance_addr <= 1;
-                    end
-                    ADD, SUB: begin
-                        Ain <= 1; Done <= 0; ROmux <= Yreg;
-                        DOmux <= 0; Rin <= 0; GOmux <= 0; advance_addr <= 0;
-                    end
-                    SPECIALM: begin
-                        Ain <= 1; Done <= 0; ROmux <= Xreg;
-                        DOmux <= 0; Rin <= 0; GOmux <= 0; advance_addr <= 0;
-                    end
-                    default: begin
-                        Done <= 0; Ain <= 0; Gin <= 0; Rin <= 0;
-                        ROmux <= 0; GOmux <= 0; DOmux <= 1; advance_addr <= 0;
-                    end
-                endcase
-            end
-            T2: begin
-                Ain <= 0;
-                case (I)
-                    ADD: begin Gin <= 1; sub <= 0; ROmux <= Xreg; shift <= 0; end
-                    SUB: begin Gin <= 1; sub <= 1; ROmux <= Xreg; shift <= 0; end
-                    SPECIALM: begin Gin <= 1; sub <= 0; shift <= 1; ROmux <= Yreg; end
-                    default: begin Gin <= 0; sub <= 0; shift <= 0; end
-                endcase
-            end
-            T3: begin
-                case (I)
-                    SPECIALM: begin
-                        Rin <= Yreg; Ain <= 0; Done <= 1;
-                        ROmux <= 0; GOmux <= 1; DOmux <= 0; Gin <= 0; IRin <= 0;
-                        advance_addr <= 1;
-                    end
-                    default: begin
-                        Rin <= Xreg; Done <= 1;
-                        GOmux <= 1; DOmux <= 0; Gin <= 0;
-                        advance_addr <= 1;
-                    end
-                endcase
-            end
-        endcase
-    end
-
-    always @(posedge Clock or negedge Resetn)
-        if (!Resetn) Tstep_Q <= T0;
-        else         Tstep_Q <= Tstep_D;
-
-    // Registers
-    regn reg_0 (.R(BusWires), .Rin(Rin[0]), .Resetn(Resetn), .Clock(Clock), .Q(R0));
-    regn reg_1 (.R(BusWires), .Rin(Rin[1]), .Resetn(Resetn), .Clock(Clock), .Q(R1));
-    regn reg_RA (.R(BusWires), .Rin(Ain), .Resetn(Resetn), .Clock(Clock), .Q(RA));
-    regn reg_RG (.R(ALU), .Rin(Gin), .Resetn(Resetn), .Clock(Clock), .Q(RG));
-    regn reg_IR (.R(DIN), .Rin(IRin), .Resetn(Resetn), .Clock(Clock), .Q(IR));
-
-    // ALU
-    addsub _addsub (.sub(sub), .Bus(BusWires), .A(RA), .shift(shift), .result(ALU));
-
-    // Mux
-    muxsmthng2one _mux (
-        .in0(R0), .in1(R1), .in2(R2), .in3(R3), .in4(R4), .in5(R5), .in6(R6), .in7(R7),
-        .inD(DIN), .inG(RG),
-        .rsele(ROmux), .gsele(GOmux), .dsele(DOmux),
-        .out(BusWires)
+    // Mux output
+    wire [8:0] mux_out;
+    muxsmthng2one mux (
+        .in0(R[0]), .in1(R[1]), .in2(R[2]), .in3(R[3]),
+        .in4(R[4]), .in5(R[5]), .in6(R[6]), .in7(R[7]),
+        .inD(IR), .inG(G),
+        .rsele(Rout),
+        .gsele(1'b0), .dsele(1'b0),
+        .out(mux_out)
     );
 
-    // === Debug outputs ===
-    assign R0_out = R0;
-    assign R1_out = R1;
-    assign RA_out = RA;
-    assign RG_out = RG;
+    // Bus logic
+    reg [8:0] bus_internal;
+    always @(*) begin
+        case (Tstep_Q)
+            2'b00: bus_internal = rom_data;
+            2'b01: bus_internal = mux_out;
+            2'b10: bus_internal = 9'b0;
+            2'b11: bus_internal = (opcode == 3'b000 || opcode == 3'b001) ? mux_out : G;
+            default: bus_internal = 9'b0;
+        endcase
+    end
+    assign BusWires = bus_internal;
+
+    // FSM logic
+    always @(posedge Clock or negedge Resetn) begin
+        if (!Resetn) begin
+            Tstep_Q <= 0;
+            DoneReg <= 0;
+        end else if (Run) begin
+            if (Tstep_Q == 2'b11) begin
+                Tstep_Q <= 0;
+                DoneReg <= 1;
+            end else begin
+                Tstep_Q <= Tstep_Q + 1;
+                DoneReg <= 0;
+            end
+        end else begin
+            Tstep_Q <= 0;
+            DoneReg <= 0;
+        end
+    end
+
+    // ROM address control
+    always @(posedge MClock or negedge Resetn) begin
+        if (!Resetn)
+            addr <= 0;
+        else if (Run && Tstep_Q == 2'b00)
+            addr <= addr + 1;
+    end
+
+    // Debug outputs
+    assign R0_out = R[0];
+    assign R1_out = R[1];
+    assign RA_out = A;
+    assign RG_out = G;
     assign IR_out = IR;
-    assign Tstep_state = Tstep_Q;
 
 endmodule

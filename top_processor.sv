@@ -1,28 +1,27 @@
-module top_processor (
-    input wire Resetn,
-    input wire PClock,
-    input wire MClock,
-    input wire Run,
-    output wire Done,
-    output wire [8:0] BusWires,
-
-    // debug signals
-    output wire [8:0] R0_out,
-    output wire [8:0] R1_out,
-    output wire [8:0] RA_out,
-    output wire [8:0] RG_out,
-    output wire [8:0] IR_out,
-    output wire [1:0] Tstep_state
+module top_processor2 (
+    input logic Resetn,
+    input logic Clock,
+    input logic MClock,
+    input logic Run,
+    output logic Done,
+    output logic [8:0] BusWires,
+    output logic [8:0] R0_out,
+    output logic [8:0] R1_out,
+    output logic [8:0] RA_out,
+    output logic [8:0] RG_out,
+    output logic [8:0] IR_out,
+    output logic [1:0] Tstep_state
 );
 
-    porc processor_unit (
+// Instantiate your processor module here
+// Example placeholder:
+    porc P (
         .Resetn(Resetn),
-        .Clock(PClock),
+        .Clock(Clock),
         .MClock(MClock),
         .Run(Run),
         .Done(Done),
         .BusWires(BusWires),
-
         .R0_out(R0_out),
         .R1_out(R1_out),
         .RA_out(RA_out),
